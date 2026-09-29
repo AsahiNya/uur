@@ -219,6 +219,7 @@ fn pump(stream: &mut TcpStream, backend: &mut dyn input::InputBackend) -> Result
     let mut header = [0u8; protocol::HEADER_BYTES];
     let mut record = [0u8; RECORD_BYTES];
     let mut injected: u64 = 0;
+    let mut warned_unsupported_key = false;
     loop {
         // EOF is the hook exiting: a clean disconnect, not an error.
         match stream.read_exact(&mut header) {
@@ -236,6 +237,19 @@ fn pump(stream: &mut TcpStream, backend: &mut dyn input::InputBackend) -> Result
             protocol::RECORD_MOUSE | protocol::RECORD_KEYBOARD => {
                 stream.read_exact(&mut record)?;
                 let record = protocol::read_record(&record);
+                if record.kind == protocol::RECORD_KEYBOARD && record.code == 0 {
+                    // Unicode and scan-code SendInput events do not carry a
+                    // virtual-key code. Text/scan-code transport is not
+                    // supported yet, but one such event must not tear down
+                    // the connection and block later ordinary key events.
+                    if !warned_unsupported_key {
+                        eprintln!(
+                            "ignoring keyboard input without a virtual-key code; Unicode and scan-code input are not supported yet"
+                        );
+                        warned_unsupported_key = true;
+                    }
+                    continue;
+                }
                 dispatch(backend, &record)?;
                 injected += 1;
             }
@@ -302,6 +316,9 @@ mod tests {
             "test"
         }
         fn key(&mut self, code: u16, down: bool) -> Result<()> {
+            if code == 0 {
+                anyhow::bail!("invalid virtual-key code");
+            }
             self.0.send(format!("key {code} {down}"))?;
             Ok(())
         }
@@ -340,6 +357,39 @@ mod tests {
             })),
             rx,
         )
+    }
+
+    fn input_packet(kind: u32, code: u16, state: u16) -> Vec<u8> {
+        let mut packet = Vec::new();
+        for value in [protocol::MAGIC, protocol::VERSION, kind, 16, kind] {
+            packet.extend_from_slice(&value.to_le_bytes());
+        }
+        packet.extend_from_slice(&code.to_le_bytes());
+        packet.extend_from_slice(&state.to_le_bytes());
+        packet.extend_from_slice(&0i32.to_le_bytes());
+        packet.extend_from_slice(&0i32.to_le_bytes());
+        packet
+    }
+
+    #[test]
+    fn zero_virtual_key_does_not_disconnect_later_keyboard_input() {
+        let (shared, events) = shared();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+        let mut backend = connection(&shared);
+        let thread = thread::spawn(move || pump(&mut server, &mut backend).unwrap());
+
+        client
+            .write_all(&input_packet(protocol::RECORD_KEYBOARD, 0, 1))
+            .unwrap();
+        client
+            .write_all(&input_packet(protocol::RECORD_KEYBOARD, 65, 1))
+            .unwrap();
+        drop(client);
+
+        assert_eq!(thread.join().unwrap(), 1);
+        assert_eq!(events.try_iter().collect::<Vec<_>>(), ["key 65 true"]);
     }
 
     #[test]
