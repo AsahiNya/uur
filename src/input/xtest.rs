@@ -210,7 +210,9 @@ fn vkey_to_keysym(vkey: u16) -> u32 {
         0x2c if vkey & 0x100 != 0 => 0xff69,   // Sys Req (extended Print)
         0x2c => 0xff61,                        // Print
         0x2d => 0xff63,                        // Insert
-        0x2e => 0xff9f,                        // Delete (keypad-style)
+        0x2e => 0xffff,                        // Delete (XK_Delete, NOT KP_Delete:
+                                               // 0xff9f lives on the KP-dot keycode
+                                               // and would type ".")
         0x2f => 0xff6a,                        // Help
         0x30..=0x39 => base,                   // 0-9
         0x41..=0x5a => base + 0x20,            // A-Z -> lowercase keysyms
@@ -279,10 +281,13 @@ mod tests {
     }
 
     #[test]
-    fn insert_maps_to_xk_insert_not_voidsymbol() {
-        // 0xffff is XK_VoidSymbol and never appears in a server keymap;
-        // mapping it here used to trigger the raw-keycode fallback.
+    fn insert_and_delete_map_to_their_own_keysyms() {
+        // XK_Insert = 0xff63, XK_Delete = 0xffff.  The historical bugs were:
+        // Insert -> 0xffff (Delete's keysym) and Delete -> 0xff9f
+        // (KP_Delete, whose keycode is the KP-dot key and types ".").
         assert_eq!(vkey_to_keysym(0x2d), 0xff63);
+        assert_eq!(vkey_to_keysym(0x2e), 0xffff);
+        assert_ne!(vkey_to_keysym(0x2d), vkey_to_keysym(0x2e));
     }
 
     #[test]
